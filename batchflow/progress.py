@@ -46,6 +46,14 @@ class ProgressTracker:
         return self._processed / self.elapsed
 
     @property
+    def eta(self) -> Optional[float]:
+        """Estimated seconds remaining based on current processing rate."""
+        if self.rate is None or self.rate == 0:
+            return None
+        remaining = self.total - (self._processed + self._skipped)
+        return remaining / self.rate
+
+    @property
     def percent(self) -> float:
         if self.total == 0:
             return 0.0
@@ -60,12 +68,14 @@ class ProgressTracker:
             "elapsed": round(self.elapsed, 3),
             "rate": round(self.rate, 3) if self.rate is not None else None,
             "percent": round(self.percent, 2),
+            "eta": round(self.eta, 3) if self.eta is not None else None,
         }
 
     def __str__(self) -> str:
+        eta_str = f" eta={self.eta:.1f}s" if self.eta is not None else ""
         return (
             f"{self.description}: {self.percent:.1f}% "
             f"({self._processed}/{self.total}) "
             f"failed={self._failed} skipped={self._skipped} "
-            f"elapsed={self.elapsed:.1f}s"
+            f"elapsed={self.elapsed:.1f}s{eta_str}"
         )
