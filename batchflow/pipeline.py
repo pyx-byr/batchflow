@@ -1,60 +1,73 @@
-"""Batch processing pipeline with checkpointing, retry, and filtering support."""
-from typing import Callable, Iterable, Any, Optional, List
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterable, List, Optional
 
 from batchflow.checkpoint import Checkpoint
-from batchflow.retry import RetryConfig, with_retry
-from batchflow.progress import ProgressTracker
 from batchflow.filter import FilterConfig
+from batchflow.retry import RetryConfig, with_retry
+from batchflow.transform import TransformConfig
+from batchflow.sink import SinkConfig
+from batchflow.logging import PipelineLogger
+from batchflow.context import PipelineContext
 
 
+@dataclass
 class BatchPipeline:
-    """Processes items in batches with optional checkpointing, retry, and filtering."""
-
-    def __init__(
-        self,
-        process_fn: Callable[[Any], Any],
-        checkpoint: Optional[Checkpoint] = None,
-        retry_config: Optional[RetryConfig] = None,
-        filters: Optional[List[FilterConfig]] = None,
-    ):
-        self.process_fn = process_fn
-        self.checkpoint = checkpoint
-        self.retry_config = retry_config
-        self.filters: List[FilterConfig] = filters or []
-        self.progress = ProgressTracker()
+    items: Iterable[Any]
+    filters: List[FilterConfig] = field(default_factory=list)
+    transforms: Optional[TransformConfig] = None
+    sink: Optional[SinkConfig] = None
+    checkpoint: Optional[Checkpoint] = None
+    retry: Optional[RetryConfig] = None
+    logger: Optional[PipelineLogger] = None
+    context: Optional[PipelineContext] = None
 
     def _passes_filters(self, item: Any) -> bool:
-        return all(f.should_process(item) for f in self.filters)
+        for f in self.filters:
+            if not f.should_process(item):
+                return False
+        return True
 
     def _process_item(self, item: Any) -> Any:
-        fn = self.process_fn
-        if self.retry_config:
-            fn = with_retry(self.retry_config)(fn)
-        return fn(item)
+        if self.transforms:
+            item = self.transforms.apply(item)
+        if self.sink:
+            self.sink.emit(item)
+        return item
 
-    def run(self, items: Iterable[Any]) -> List[Any]:
-        """Run the pipeline over items, skipping already-processed ones."""
+    def run(self) -> List[Any]:
+        if self.context:
+            self.context.start()
+
+        seen = set()
+        if self.checkpoint:
+            seen = self.checkpoint.load()
+
         results = []
-        for item in items:
-            key = str(item)
 
-            if self.checkpoint and self.checkpoint.exists(key):
-                self.progress.increment_skipped()
-                results.append(self.checkpoint.load(key))
+        process_fn = self._process_item
+        if self.retry:
+            process_fn = with_retry(self.retry)(self._process_item)
+
+        for item in self.items:
+            item_id = str(item)
+            if item_id in seen:
+                if self.logger:
+                    self.logger.info(f"Skipping already processed item: {item}")
                 continue
-
             if not self._passes_filters(item):
-                self.progress.increment_skipped()
                 continue
-
             try:
-                result = self._process_item(item)
-                if self.checkpoint:
-                    self.checkpoint.save(key, result)
-                self.progress.increment()
+                result = process_fn(item)
                 results.append(result)
-            except Exception:
-                self.progress.increment_failed()
+                seen.add(item_id)
+                if self.checkpoint:
+                    self.checkpoint.save(seen)
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"Failed to process item {item}: {e}")
                 raise
+
+        if self.context:
+            self.context.stop()
 
         return results
