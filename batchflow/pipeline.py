@@ -1,58 +1,54 @@
-from typing import Any, Callable, Iterable, Iterator, List, Optional
-from .checkpoint import Checkpoint
+"""Batch pipeline with checkpointing and retry support."""
+
+import logging
+from typing import Callable, Iterable, Any
+
+from batchflow.checkpoint import Checkpoint
+from batchflow.retry import RetryConfig, retry_call
+
+logger = logging.getLogger(__name__)
 
 
 class BatchPipeline:
-    """A resumable batch data processing pipeline with checkpointing support."""
+    """Processes items in batches with optional checkpointing and retry."""
 
     def __init__(
         self,
-        pipeline_id: str,
-        steps: List[Callable[[Any], Any]],
-        checkpoint_dir: str = ".batchflow_checkpoints",
+        name: str,
+        processor: Callable[[Any], Any],
+        checkpoint_dir: str = ".checkpoints",
+        retry_config: RetryConfig = None,
     ):
-        self.pipeline_id = pipeline_id
-        self.steps = steps
-        self.checkpoint = Checkpoint(checkpoint_dir)
+        self.name = name
+        self.processor = processor
+        self.checkpoint = Checkpoint(name=name, directory=checkpoint_dir)
+        self.retry_config = retry_config or RetryConfig(max_attempts=1)
 
     def _process_item(self, item: Any) -> Any:
-        for step in self.steps:
-            item = step(item)
-        return item
+        """Process a single item, applying retry logic."""
+        return retry_call(
+            self.processor,
+            args=(item,),
+            config=self.retry_config,
+        )
 
-    def run(
-        self,
-        data: Iterable[Any],
-        batch_size: int = 100,
-        resume: bool = True,
-    ) -> Iterator[List[Any]]:
-        """Process data in batches, yielding results per batch.
+    def run(self, items: Iterable[Any], resume: bool = True) -> list:
+        """Run the pipeline over all items."""
+        state = self.checkpoint.load() if resume else {}
+        results = state.get("results", [])
+        completed = state.get("completed", 0)
 
-        If resume=True and a checkpoint exists, processing skips already-completed batches.
-        """
-        start_batch = 0
-        if resume and self.checkpoint.exists(self.pipeline_id):
-            state = self.checkpoint.load(self.pipeline_id)
-            start_batch = state["batch_index"] + 1
-            print(f"[{self.pipeline_id}] Resuming from batch {start_batch}")
+        items = list(items)
+        logger.info(
+            "Pipeline '%s': %d items total, resuming from item %d.",
+            self.name, len(items), completed
+        )
 
-        batch: List[Any] = []
-        batch_index = 0
+        for idx, item in enumerate(items[completed:], start=completed):
+            result = self._process_item(item)
+            results.append(result)
+            self.checkpoint.save({"results": results, "completed": idx + 1})
+            logger.debug("Processed item %d/%d.", idx + 1, len(items))
 
-        for item in data:
-            batch.append(item)
-            if len(batch) == batch_size:
-                if batch_index >= start_batch:
-                    results = [self._process_item(x) for x in batch]
-                    self.checkpoint.save(self.pipeline_id, batch_index)
-                    yield results
-                batch = []
-                batch_index += 1
-
-        if batch and batch_index >= start_batch:
-            results = [self._process_item(x) for x in batch]
-            self.checkpoint.save(self.pipeline_id, batch_index)
-            yield results
-
-        self.checkpoint.clear(self.pipeline_id)
-        print(f"[{self.pipeline_id}] Pipeline complete. Checkpoint cleared.")
+        self.checkpoint.clear()
+        return results
