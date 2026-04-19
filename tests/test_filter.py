@@ -31,6 +31,11 @@ class TestFilterConfig:
         with pytest.raises(ValueError, match="bad"):
             fc.should_process(1)
 
+    def test_log_filtered_flag(self):
+        """Ensure log_filtered can be set to True and is stored correctly."""
+        fc = FilterConfig(predicate=lambda x: x > 0, log_filtered=True)
+        assert fc.log_filtered is True
+
 
 class TestApplyFilters:
     def test_no_filters_returns_all(self):
@@ -53,3 +58,9 @@ class TestApplyFilters:
     def test_empty_items(self):
         fc = FilterConfig(predicate=lambda x: True)
         assert apply_filters([], [fc]) == []
+
+    def test_filter_preserves_order(self):
+        """Items passing the filter should retain their original order."""
+        fc = FilterConfig(predicate=lambda x: x % 2 == 0)
+        result = apply_filters([4, 1, 2, 7, 6], [fc])
+        assert result == [4, 2, 6]
