@@ -45,6 +45,15 @@ class PipelineContext:
         self.tags[key] = value
         return self
 
+    def reset(self) -> "PipelineContext":
+        """Reset timing state so the context can be reused for a new run.
+
+        Clears start and end timestamps but preserves metadata and tags.
+        """
+        self._start_time = None
+        self._end_time = None
+        return self
+
     def __repr__(self) -> str:
         return (
             f"PipelineContext(run_id={self.run_id!r}, "
