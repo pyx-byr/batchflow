@@ -59,3 +59,14 @@ class TestPipelineTimeout:
         )
         results = pipeline.run()
         assert results == []
+
+    def test_pipeline_timeout_name_defaults_to_none(self):
+        """TimeoutConfig without a name should have name set to None."""
+        t = TimeoutConfig(seconds=1.0)
+        assert t.name is None
+
+    def test_pipeline_timeout_name_is_preserved(self):
+        """TimeoutConfig should preserve the provided name."""
+        t = TimeoutConfig(seconds=1.0, name="my_timeout")
+        pipeline = self._make_pipeline(timeout=t)
+        assert pipeline.timeout.name == "my_timeout"
