@@ -1,123 +1,139 @@
-from typing import Any, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Generator, Iterable, List, Optional
+
 from batchflow.checkpoint import Checkpoint
-from batchflow.filter import FilterConfig
-from batchflow.schema import SchemaConfig
-from batchflow.transform import TransformConfig
+from batchflow.filter import FilterConfig, apply_filters
+from batchflow.schema import SchemaConfig, apply_schema
+from batchflow.transform import TransformConfig, apply_transforms
 from batchflow.sink import SinkConfig
 from batchflow.retry import RetryConfig, with_retry
 from batchflow.logging import PipelineLogger
 from batchflow.context import PipelineContext
-from batchflow.hook import HookConfig
 from batchflow.metrics import MetricsCollector
+from batchflow.hook import HookConfig
 from batchflow.event import EventBus
 from batchflow.ratelimit import RateLimiter
 from batchflow.pause import PauseControl
 from batchflow.timeout import TimeoutConfig, apply_timeout
+from batchflow.buffer import BufferConfig
+from batchflow.priority import PriorityConfig, apply_priority
 
 
+@dataclass
 class BatchPipeline:
-    def __init__(
-        self,
-        items: List[Any],
-        checkpoint: Checkpoint,
-        filters: Optional[FilterConfig] = None,
-        schema: Optional[SchemaConfig] = None,
-        transform: Optional[TransformConfig] = None,
-        sink: Optional[SinkConfig] = None,
-        retry: Optional[RetryConfig] = None,
-        logger: Optional[PipelineLogger] = None,
-        context: Optional[PipelineContext] = None,
-        hooks: Optional[HookConfig] = None,
-        metrics: Optional[MetricsCollector] = None,
-        event_bus: Optional[EventBus] = None,
-        rate_limiter: Optional[RateLimiter] = None,
-        pause_control: Optional[PauseControl] = None,
-        timeout: Optional[TimeoutConfig] = None,
-    ):
-        self.items = items
-        self.checkpoint = checkpoint
-        self.filters = filters
-        self.schema = schema
-        self.transform = transform
-        self.sink = sink
-        self.retry = retry
-        self.logger = logger
-        self.context = context
-        self.hooks = hooks
-        self.metrics = metrics
-        self.event_bus = event_bus
-        self.rate_limiter = rate_limiter
-        self.pause_control = pause_control
-        self.timeout = timeout
+    """A resumable batch data processing pipeline with checkpointing."""
+
+    checkpoint: Checkpoint
+    filters: Optional[FilterConfig] = None
+    schema: Optional[SchemaConfig] = None
+    transforms: Optional[TransformConfig] = None
+    sink: Optional[SinkConfig] = None
+    retry: Optional[RetryConfig] = None
+    logger: Optional[PipelineLogger] = None
+    context: Optional[PipelineContext] = None
+    metrics: Optional[MetricsCollector] = None
+    hooks: Optional[HookConfig] = None
+    events: Optional[EventBus] = None
+    rate_limiter: Optional[RateLimiter] = None
+    pause_control: Optional[PauseControl] = None
+    timeout: Optional[TimeoutConfig] = None
+    buffer: Optional[BufferConfig] = None
+    priority: Optional[PriorityConfig] = None
 
     def _passes_filters(self, item: Any) -> bool:
         if self.filters is None:
             return True
-        return self.filters.should_process(item)
+        return apply_filters(item, self.filters)
 
     def _passes_schema(self, item: Any) -> bool:
         if self.schema is None:
             return True
-        errors = self.schema.validate(item)
+        errors = apply_schema(item, self.schema)
         return len(errors) == 0
 
     def _process_item(self, item: Any) -> Any:
-        if self.transform:
-            item = apply_timeout(self.timeout, self.transform.apply, item)
+        if self.transforms:
+            item = apply_transforms(item, self.transforms)
         return item
 
-    def run(self) -> List[Any]:
-        processed = self.checkpoint.load()
-        seen_ids = {r["id"] for r in processed if "id" in r} if processed else set()
-        results = []
-
+    def run(self, items: Iterable[Any]) -> Generator[Any, None, None]:
+        """Process items through the pipeline, yielding results."""
         if self.context:
             self.context.start()
         if self.hooks:
             self.hooks.fire_start()
-        if self.event_bus:
-            self.event_bus.publish("pipeline.start", {})
+        if self.events:
+            self.events.publish("pipeline.start", {})
 
-        for item in self.items:
+        processed_ids = self.checkpoint.load()
+
+        item_list = list(items)
+
+        # Apply priority ordering if configured
+        if self.priority:
+            item_list = apply_priority(item_list, self.priority)
+
+        for item in item_list:
             item_id = str(item)
-            if item_id in seen_ids:
+
+            if item_id in processed_ids:
                 continue
-            if not self._passes_filters(item):
-                continue
-            if not self._passes_schema(item):
-                continue
+
+            if self._control:
+                self.pause_control.wait_if_paused()
+
             if self.rate_limiter:
                 self.rate_limiter.acquire()
-            if self.pause_control:
-                self.pause_control.wait_if_paused()
+
+            if not self._passes_filters(item):
+                continue
+
+            if not self._passes_schema(item):
+                continue
+
             try:
                 if self.retry:
                     fn = with_retry(self.retry)(self._process_item)
                     result = fn(item)
+                elif self.timeout and self.timeout.enabled:
+                    result = apply_timeout(self._process_item, item, self.timeout)
                 else:
                     result = self._process_item(item)
-                results.append(result)
-                if self.sink:
-                    self.sink.emit(result)
-                if self.hooks:
-                    self.hooks.fire_item(result)
-                if self.metrics:
-                    self.metrics.increment("processed")
-            except Exception as e:
+            except Exception as exc:
                 if self.logger:
-                    self.logger.error(f"Failed item {item_id}: {e}")
-                if self.metrics:
-                    self.metrics.increment("failed")
+                    self.logger.error(f"Failed to process item {item_id}: {exc}")
                 if self.hooks:
-                    self.hooks.fire_error(e)
+                    self.hooks.fire_error(exc)
+                if self.events:
+                    self.events.publish("pipeline.error", {"item": item, "error": exc})
+                continue
 
-        self.checkpoint.save([{"id": str(r)} for r in results])
+            if self.sink:
+                self.sink.emit(result)
 
-        if self.hooks:
-            self.hooks.fire_end()
+            if self.buffer:
+                self.buffer.add(result)
+
+            if self.hooks:
+                self.hooks.fire_item(result)
+
+            if self.events:
+                self.events.publish("pipeline.item", {"item": result})
+
+            if self.metrics:
+                self.metrics.increment("items_processed")
+
+            processed_ids.add(item_id)
+            self.checkpoint.save(processed_ids)
+
+            yield result
+
+        if self.buffer and not self.buffer.is_empty():
+            self.buffer.flush()
+
         if self.context:
             self.context.stop()
-        if self.event_bus:
-            self.event_bus.publish("pipeline.end", {"count": len(results)})
-
-        return results
+        if self.hooks:
+            self.hooks.fire_end()
+        if self.events:
+            self.events.publish("pipeline.end", {})
