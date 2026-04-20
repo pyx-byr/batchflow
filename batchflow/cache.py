@@ -54,6 +54,14 @@ class CacheConfig:
     def size(self) -> int:
         return len(self._store)
 
+    @property
+    def hit_rate(self) -> Optional[float]:
+        """Return the cache hit rate as a float in [0, 1], or None if no lookups have been made."""
+        total = self._hits + self._misses
+        if total == 0:
+            return None
+        return self._hits / total
+
 
 def apply_cache(item: Any, fn: Callable, cache: CacheConfig) -> Any:
     if cache.has(item):
