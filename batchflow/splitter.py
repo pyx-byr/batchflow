@@ -1,112 +1,88 @@
-"""SplitterConfig — split pipeline items into multiple sub-items.
-
-Allows a single input item to be expanded into many items before
-downstream processing, e.g. splitting a document into sentences or
-a batch record into individual rows.
-"""
+"""SplitterConfig: splits a single item into multiple sub-items for downstream processing."""
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, List, Optional
+from typing import Any, Callable, Iterator, List, Optional
 
 
 @dataclass
 class SplitterConfig:
     """Configuration for splitting pipeline items into sub-items.
 
-    Attributes:
-        name: Human-readable label for this splitter (useful for logging).
-        split_fn: Callable that takes one item and returns an iterable of
-                  sub-items.  Defaults to ``None`` (identity — no splitting).
-        skip_empty: When *True* (default), sub-items that are ``None`` or
-                    empty strings/lists/dicts are dropped silently.
-        max_splits: Optional upper bound on the number of sub-items produced
-                    from a single source item.  Excess sub-items are dropped.
+    Useful when a single input item (e.g. a batch record, a file, a chunk)
+    needs to be expanded into multiple independent items before further
+    processing.
+
+    Example usage::
+
+        splitter = (
+            SplitterConfig()
+            .set_fn(lambda item: item.get("rows", [item]))
+            .set_max_splits(100)
+        )
     """
 
     name: str = "splitter"
-    split_fn: Optional[Callable[[Any], Iterable[Any]]] = None
-    skip_empty: bool = True
-    max_splits: Optional[int] = None
+    _fn: Optional[Callable[[Any], Iterator[Any]]] = field(default=None, repr=False, init=False)
+    _max_splits: Optional[int] = field(default=None, repr=False, init=False)
 
     def __post_init__(self) -> None:
-        if self.max_splits is not None and self.max_splits < 1:
-            raise ValueError(
-                f"max_splits must be a positive integer, got {self.max_splits}"
-            )
+        if self._max_splits is not None and self._max_splits < 1:
+            raise ValueError("max_splits must be a positive integer")
 
-    # ------------------------------------------------------------------
-    # Fluent builder helpers
-    # ------------------------------------------------------------------
+    def set_fn(self, fn: Callable[[Any], Iterator[Any]]) -> "SplitterConfig":
+        """Set the function used to split an item into sub-items.
 
-    def set_fn(self, fn: Callable[[Any], Iterable[Any]]) -> "SplitterConfig":
-        """Set the split function and return *self* for chaining."""
-        self.split_fn = fn
+        The function must accept a single item and return an iterable of
+        sub-items.
+        """
+        if not callable(fn):
+            raise TypeError("fn must be callable")
+        self._fn = fn
         return self
 
-    def set_max_splits(self, n: int) -> "SplitterConfig":
-        """Set *max_splits* and return *self* for chaining."""
-        if n < 1:
-            raise ValueError(f"max_splits must be a positive integer, got {n}")
-        self.max_splits = n
+    def set_max_splits(self, max_splits: int) -> "SplitterConfig":
+        """Limit the number of sub-items produced per input item."""
+        if max_splits < 1:
+            raise ValueError("max_splits must be a positive integer")
+        self._max_splits = max_splits
         return self
-
-    # ------------------------------------------------------------------
-    # Core logic
-    # ------------------------------------------------------------------
 
     def split(self, item: Any) -> List[Any]:
         """Split *item* into a list of sub-items.
 
-        If no ``split_fn`` is configured the original item is returned
-        wrapped in a single-element list (identity behaviour).
+        If no split function has been configured the original item is returned
+        wrapped in a single-element list (i.e. a no-op split).
 
-        Args:
-            item: The source item to split.
-
-        Returns:
-            A list of sub-items produced by ``split_fn`` (or ``[item]``).
+        If *max_splits* is set, at most that many sub-items are returned.
         """
-        if self.split_fn is None:
+        if self._fn is None:
             return [item]
 
         results: List[Any] = []
-        for sub in self.split_fn(item):
-            if self.skip_empty and _is_empty(sub):
-                continue
+        for sub in self._fn(item):
             results.append(sub)
-            if self.max_splits is not None and len(results) >= self.max_splits:
+            if self._max_splits is not None and len(results) >= self._max_splits:
                 break
 
         return results
 
+    @property
+    def max_splits(self) -> Optional[int]:
+        """Return the configured max_splits limit (or *None* if unlimited)."""
+        return self._max_splits
 
-# ---------------------------------------------------------------------------
-# Module-level helper
-# ---------------------------------------------------------------------------
-
-def _is_empty(value: Any) -> bool:
-    """Return *True* if *value* is considered empty."""
-    if value is None:
-        return True
-    if isinstance(value, (str, list, dict, tuple, set)) and len(value) == 0:
-        return True
-    return False
+    @property
+    def fn(self) -> Optional[Callable[[Any], Iterator[Any]]]:
+        """Return the configured split function (or *None* if not set)."""
+        return self._fn
 
 
 def apply_splitter(
-    splitter: Optional[SplitterConfig],
-    item: Any,
+    splitter: Optional[SplitterConfig], item: Any
 ) -> List[Any]:
-    """Convenience wrapper used by the pipeline.
+    """Apply *splitter* to *item* and return the resulting sub-items.
 
     If *splitter* is ``None`` the item is returned as-is in a list.
-
-    Args:
-        splitter: A :class:`SplitterConfig` instance or ``None``.
-        item: The item to (potentially) split.
-
-    Returns:
-        List of sub-items.
     """
     if splitter is None:
         return [item]
