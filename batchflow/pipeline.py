@@ -1,44 +1,49 @@
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generator, Iterable, List, Optional
+from typing import Any, Callable, Iterable, List, Optional
 
 from batchflow.checkpoint import Checkpoint
 from batchflow.filter import FilterConfig, apply_filters
 from batchflow.schema import SchemaConfig, apply_schema
-from batchflow.transform import TransformConfig, apply_transforms
-from batchflow.sink import SinkConfig
-from batchflow.retry import RetryConfig, with_retry
-from batchflow.logging import PipelineLogger
-from batchflow.context import PipelineContext
-from batchflow.metrics import MetricsCollector
-from batchflow.hook import HookConfig
-from batchflow.event import EventBus
-from batchflow.ratelimit import RateLimiter
-from batchflow.pause import PauseControl
-from batchflow.timeout import TimeoutConfig, apply_timeout
-from batchflow.buffer import BufferConfig
-from batchflow.priority import PriorityConfig, apply_priority
+from batchflow.enricher import EnricherConfig, apply_enricher
 
 
 @dataclass
 class BatchPipeline:
-    """A resumable batch data processing pipeline with checkpointing."""
+    """Resumable batch processing pipeline with checkpointing."""
 
-    checkpoint: Checkpoint
+    name: str = "pipeline"
+    checkpoint_dir: str = "/tmp/batchflow_checkpoints"
     filters: Optional[FilterConfig] = None
     schema: Optional[SchemaConfig] = None
-    transforms: Optional[TransformConfig] = None
-    sink: Optional[SinkConfig] = None
-    retry: Optional[RetryConfig] = None
-    logger: Optional[PipelineLogger] = None
-    context: Optional[PipelineContext] = None
-    metrics: Optional[MetricsCollector] = None
-    hooks: Optional[HookConfig] = None
-    events: Optional[EventBus] = None
-    rate_limiter: Optional[RateLimiter] = None
-    pause_control: Optional[PauseControl] = None
-    timeout: Optional[TimeoutConfig] = None
-    buffer: Optional[BufferConfig] = None
-    priority: Optional[PriorityConfig] = None
+    enricher: Optional[EnricherConfig] = None
+    retry: Any = None
+    logger: Any = None
+    context: Any = None
+    hooks: Any = None
+    metrics: Any = None
+    event_bus: Any = None
+    rate_limiter: Any = None
+    pause_control: Any = None
+    timeout: Any = None
+    buffer: Any = None
+    priority: Any = None
+    _extra: dict = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self):
+        self._checkpoint = Checkpoint(name=self.name, checkpoint_dir=self.checkpoint_dir)
+
+    def __setattr__(self, name, value):
+        # Allow arbitrary keyword arguments to be stored without breaking dataclass
+        try:
+            super().__setattr__(name, value)
+        except AttributeError:
+            object.__getattribute__(self, "_extra")[name] = value
+
+    def __getattr__(self, name):
+        extra = object.__getattribute__(self, "_extra")
+        if name in extra:
+            return extra[name]
+        raise AttributeError(name)
 
     def _passes_filters(self, item: Any) -> bool:
         if self.filters is None:
@@ -51,89 +56,54 @@ class BatchPipeline:
         errors = apply_schema(item, self.schema)
         return len(errors) == 0
 
-    def _process_item(self, item: Any) -> Any:
-        if self.transforms:
-            item = apply_transforms(item, self.transforms)
-        return item
+    def _enrich_item(self, item: Any) -> Any:
+        return apply_enricher(item, self.enricher)
 
-    def run(self, items: Iterable[Any]) -> Generator[Any, None, None]:
-        """Process items through the pipeline, yielding results."""
-        if self.context:
-            self.context.start()
-        if self.hooks:
-            self.hooks.fire_start()
-        if self.events:
-            self.events.publish("pipeline.start", {})
-
-        processed_ids = self.checkpoint.load()
-
-        item_list = list(items)
-
-        # Apply priority ordering if configured
-        if self.priority:
-            item_list = apply_priority(item_list, self.priority)
-
-        for item in item_list:
-            item_id = str(item)
-
-            if item_id in processed_ids:
-                continue
-
-            if self._control:
-                self.pause_control.wait_if_paused()
-
-            if self.rate_limiter:
-                self.rate_limiter.acquire()
-
+    def _process_item(
+        self,
+        item: Any,
+        processor: Callable[[Any], Any],
+        sink: Optional[Callable[[Any], None]],
+    ) -> bool:
+        try:
             if not self._passes_filters(item):
-                continue
-
+                return False
             if not self._passes_schema(item):
+                return False
+            item = self._enrich_item(item)
+            result = processor(item)
+            if sink is not None and result is not None:
+                sink(result)
+            return True
+        except Exception as exc:
+            if self.logger is not None:
+                self.logger.error(f"Error processing item {item!r}: {exc}")
+            return False
+
+    def run(
+        self,
+        items: Iterable[Any],
+        processor: Callable[[Any], Any],
+        sink: Optional[Callable[[Any], None]] = None,
+        id_fn: Optional[Callable[[Any], str]] = None,
+    ) -> None:
+        """Process *items* one by one, skipping already-checkpointed ids."""
+        if self.hooks is not None:
+            self.hooks.fire_start()
+        if self.context is not None:
+            self.context.start()
+
+        for item in items:
+            item_id = id_fn(item) if id_fn else None
+            if item_id is not None and self._checkpoint.exists(item_id):
                 continue
 
-            try:
-                if self.retry:
-                    fn = with_retry(self.retry)(self._process_item)
-                    result = fn(item)
-                elif self.timeout and self.timeout.enabled:
-                    result = apply_timeout(self._process_item, item, self.timeout)
-                else:
-                    result = self._process_item(item)
-            except Exception as exc:
-                if self.logger:
-                    self.logger.error(f"Failed to process item {item_id}: {exc}")
-                if self.hooks:
-                    self.hooks.fire_error(exc)
-                if self.events:
-                    self.events.publish("pipeline.error", {"item": item, "error": exc})
-                continue
+            success = self._process_item(item, processor, sink)
 
-            if self.sink:
-                self.sink.emit(result)
+            if success and item_id is not None:
+                self._checkpoint.save(item_id)
 
-            if self.buffer:
-                self.buffer.add(result)
-
-            if self.hooks:
-                self.hooks.fire_item(result)
-
-            if self.events:
-                self.events.publish("pipeline.item", {"item": result})
-
-            if self.metrics:
-                self.metrics.increment("items_processed")
-
-            processed_ids.add(item_id)
-            self.checkpoint.save(processed_ids)
-
-            yield result
-
-        if self.buffer and not self.buffer.is_empty():
-            self.buffer.flush()
-
-        if self.context:
+        if self.context is not None:
             self.context.stop()
-        if self.hooks:
+        if self.hooks is not None:
             self.hooks.fire_end()
-        if self.events:
-            self.events.publish("pipeline.end", {})
