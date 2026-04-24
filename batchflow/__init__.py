@@ -1,5 +1,5 @@
-from batchflow.pipeline import BatchPipeline
 from batchflow.checkpoint import Checkpoint
+from batchflow.pipeline import BatchPipeline
 from batchflow.retry import RetryConfig, with_retry
 from batchflow.progress import ProgressTracker
 from batchflow.filter import FilterConfig, apply_filters
@@ -26,11 +26,12 @@ from batchflow.buffer import BufferConfig
 from batchflow.splitter import SplitterConfig
 from batchflow.priority import PriorityConfig
 from batchflow.tagger import TaggerConfig
-from batchflow.enricher import EnricherConfig, apply_enricher
+from batchflow.enricher import EnricherConfig
+from batchflow.aggregator import AggregatorConfig, apply_aggregator
 
 __all__ = [
-    "BatchPipeline",
     "Checkpoint",
+    "BatchPipeline",
     "RetryConfig",
     "with_retry",
     "ProgressTracker",
@@ -68,5 +69,6 @@ __all__ = [
     "PriorityConfig",
     "TaggerConfig",
     "EnricherConfig",
-    "apply_enricher",
+    "AggregatorConfig",
+    "apply_aggregator",
 ]
