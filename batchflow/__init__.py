@@ -27,7 +27,9 @@ from batchflow.splitter import SplitterConfig
 from batchflow.priority import PriorityConfig
 from batchflow.tagger import TaggerConfig
 from batchflow.enricher import EnricherConfig
-from batchflow.aggregator import AggregatorConfig, apply_aggregator
+from batchflow.aggregator import AggregatorConfig
+from batchflow.partitioner import PartitionerConfig
+from batchflow.mapper import MapperConfig, apply_mapper
 
 __all__ = [
     "Checkpoint",
@@ -70,5 +72,7 @@ __all__ = [
     "TaggerConfig",
     "EnricherConfig",
     "AggregatorConfig",
-    "apply_aggregator",
+    "PartitionerConfig",
+    "MapperConfig",
+    "apply_mapper",
 ]
