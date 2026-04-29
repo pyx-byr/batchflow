@@ -1,5 +1,3 @@
-"""batchflow — A lightweight Python library for building resumable batch data processing pipelines."""
-
 from batchflow.checkpoint import Checkpoint
 from batchflow.pipeline import BatchPipeline
 from batchflow.retry import RetryConfig, with_retry
@@ -35,7 +33,10 @@ from batchflow.mapper import MapperConfig
 from batchflow.window import WindowConfig
 from batchflow.sampler import SamplerConfig
 from batchflow.limiter import LimiterConfig
-from batchflow.watchdog import WatchdogConfig, apply_watchdog
+from batchflow.watchdog import WatchdogConfig
+from batchflow.checkpoint_policy import CheckpointPolicy
+from batchflow.labeler import LabelerConfig
+from batchflow.scanner import ScannerConfig, apply_scanner
 
 __all__ = [
     "Checkpoint",
@@ -84,5 +85,8 @@ __all__ = [
     "SamplerConfig",
     "LimiterConfig",
     "WatchdogConfig",
-    "apply_watchdog",
+    "CheckpointPolicy",
+    "LabelerConfig",
+    "ScannerConfig",
+    "apply_scanner",
 ]
