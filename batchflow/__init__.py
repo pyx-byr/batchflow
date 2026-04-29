@@ -36,7 +36,8 @@ from batchflow.limiter import LimiterConfig
 from batchflow.watchdog import WatchdogConfig
 from batchflow.checkpoint_policy import CheckpointPolicy
 from batchflow.labeler import LabelerConfig
-from batchflow.scanner import ScannerConfig, apply_scanner
+from batchflow.scanner import ScannerConfig
+from batchflow.reducer import ReducerConfig, apply_reducer
 
 __all__ = [
     "Checkpoint",
@@ -88,5 +89,6 @@ __all__ = [
     "CheckpointPolicy",
     "LabelerConfig",
     "ScannerConfig",
-    "apply_scanner",
+    "ReducerConfig",
+    "apply_reducer",
 ]
